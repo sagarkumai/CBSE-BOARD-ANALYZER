@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CBSE Top-5 Percentage Calculator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --bg:#f7f7fb; --card:#ffffff; --text:#1a1a1f; --muted:#6b6b76;
+  --accent:#4f46e5; --accent-text:#ffffff; --border:#e3e3ea; --head:#eef0ff;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111114; --card:#1a1a1f; --text:#f0f0f3; --muted:#9a9aa5;
+    --accent:#818cf8; --accent-text:#111114; --border:#2b2b33; --head:#23233a;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111114; --card:#1a1a1f; --text:#f0f0f3; --muted:#9a9aa5;
+  --accent:#818cf8; --accent-text:#111114; --border:#2b2b33; --head:#23233a;
+}
+html{scroll-padding-top:env(safe-area-inset-top,0px);}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;}
+.wrap{max-width:900px;margin:0 auto;padding:24px 16px 48px;}
+h1{font-size:1.4rem;margin:0 0 4px;}
+p.sub{color:var(--muted);margin:0 0 20px;font-size:.92rem;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:16px;}
+input[type=file]{color:var(--text);}
+button{background:var(--accent);color:var(--accent-text);border:none;border-radius:8px;padding:10px 16px;font-size:.92rem;font-weight:600;cursor:pointer;margin:4px 8px 4px 0;}
+button:disabled{opacity:.45;cursor:not-allowed;}
+button.secondary{background:transparent;color:var(--accent);border:1px solid var(--accent);}
+.tablewrap{overflow-x:auto;max-width:100%;border:1px solid var(--border);border-radius:10px;}
+table{border-collapse:collapse;width:100%;font-size:.85rem;white-space:nowrap;}
+th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;}
+thead th{background:var(--head);position:sticky;top:0;}
+.status{color:var(--muted);font-size:.85rem;margin-top:8px;}
+.err{color:#dc2626;}
+.pct{font-weight:700;color:var(--accent);}
+.hidden{display:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CBSE Top-5 Subject Percentage</h1>
+  <p class="sub">Upload a CBSE gazette-style result file (.TXT, fixed-width) or a plain CSV. It's auto-detected either way. Each candidate's best 5 subject marks are averaged into a percentage, downloadable as Excel or CSV.</p>
+
+  <div class="card">
+    <input type="file" id="fileInput" accept=".csv,.txt">
+    <div class="status" id="status">No file selected.</div>
+  </div>
+
+  <div class="card hidden" id="previewCard">
+    <strong>Preview (first 5 rows)</strong>
+    <div class="tablewrap" style="margin-top:10px;"><table id="previewTable"></table></div>
+    <div class="status" id="detectStatus"></div>
+    <button id="calcBtn">Calculate Top-5 %</button>
+  </div>
+
+  <div class="card hidden" id="resultsCard">
+    <strong>Results</strong>
+    <div class="tablewrap" style="margin-top:10px;max-height:420px;overflow-y:auto;"><table id="resultsTable"></table></div>
+    <div style="margin-top:14px;">
+      <button id="dlXlsx">Download Excel (.xlsx)</button>
+      <button class="secondary" id="dlCsv">Download CSV</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let rows = [], columns = [], subjectCols = [], idCols = [], results = [];
+
+const statusEl = document.getElementById('status');
+const previewCard = document.getElementById('previewCard');
+const resultsCard = document.getElementById('resultsCard');
+
+function looksLikeGazette(text){
+  return /SENIOR SCHOOL CERTIFICATE EXAMINATION/i.test(text) || /^\d{6,12}\s+[MF]\s+\S/m.test(text);
+}
+
+// CBSE "school/roll-no wise gazette" fixed-width format: 2 lines per candidate.
+// Line 1: roll no, sex, name, 6x subject code, 3x overall grade, result, compartment subj.
+// Line 2 (indented): 6x (marks, grade) pairs aligned under the subject codes.
+function parseGazetteTxt(text){
+  const lines = text.split(/\r\n|\n/);
+  const rollRe = /^(\d{6,12})\s+([A-Z])\s+\S/;
+  let schoolCode = '', schoolName = '';
+  const records = [];
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    const schoolMatch = line.match(/^SCHOOL\s*:\s*-\s*(\d+)\s+(.+?)\s*$/);
+    if(schoolMatch){ schoolCode = schoolMatch[1]; schoolName = schoolMatch[2].trim(); continue; }
+    const m = line.match(rollRe);
+    if(m && line.length > 100){
+      const markLine = lines[i+1] || '';
+      const rec = {
+        'Roll No': line.substring(0,8).trim(),
+        'Sex': line.substring(11,12).trim(),
+        'Name': line.substring(13,64).trim(),
+        'School Code': schoolCode,
+        'School Name': schoolName
+      };
+      for(let s=0;s<6;s++){
+        const start = 65 + 8*s;
+        const code = line.substring(start, start+3).trim();
+        if(!code) continue;
+        const markRaw = markLine.substring(start, start+3).trim();
+        const gradeRaw = markLine.substring(start+5, start+7).trim();
+        rec['Sub'+(s+1)+'_Code'] = code;
+        rec['Sub'+(s+1)+'_Marks'] = /^\d+$/.test(markRaw) ? Number(markRaw) : '';
+        rec['Sub'+(s+1)+'_Grade'] = gradeRaw;
+      }
+      const tail = line.substring(126).trim().split(/\s+/).filter(Boolean);
+      rec['Result'] = tail[0] || '';
+      rec['Comp Subject'] = tail.slice(1).join(' ');
+      records.push(rec);
+      i++; // consume the paired marks line
+    }
+  }
+  const colSet = [];
+  records.forEach(r=>Object.keys(r).forEach(k=>{ if(!colSet.includes(k)) colSet.push(k); }));
+  return { columns: colSet, rows: records };
+}
+
+function finishLoad(msg){
+  detectColumns();
+  renderPreview();
+  statusEl.textContent = msg+' — '+rows.length+' candidates, '+columns.length+' columns.';
+  previewCard.classList.remove('hidden');
+  resultsCard.classList.add('hidden');
+}
+
+document.getElementById('fileInput').addEventListener('change', e=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  statusEl.textContent = 'Reading "'+file.name+'"…';
+  const reader = new FileReader();
+  reader.onload = ev=>{
+    const text = ev.target.result;
+    if(looksLikeGazette(text)){
+      const parsed = parseGazetteTxt(text);
+      if(parsed.rows.length === 0){ statusEl.innerHTML = '<span class="err">Recognized gazette format but found no candidate rows. Check the file.</span>'; return; }
+      rows = parsed.rows; columns = parsed.columns;
+      finishLoad('CBSE gazette (.TXT) format detected');
+    } else {
+      Papa.parse(text, {
+        header:true, skipEmptyLines:true, dynamicTyping:true,
+        complete: res=>{
+          if(res.errors.length){ statusEl.innerHTML = '<span class="err">Parse error: '+res.errors[0].message+'</span>'; return; }
+          rows = res.data; columns = res.meta.fields || [];
+          finishLoad('CSV format loaded');
+        },
+        error: err=>{ statusEl.innerHTML = '<span class="err">'+err.message+'</span>'; }
+      });
+    }
+  };
+  reader.onerror = ()=>{ statusEl.innerHTML = '<span class="err">Could not read the file.</span>'; };
+  reader.readAsText(file);
+});
+
+function detectColumns(){
+  subjectCols = []; idCols = [];
+  columns.forEach(col=>{
+    let numericCount = 0, total = 0;
+    rows.forEach(r=>{
+      const v = r[col];
+      if(v === null || v === undefined || v === '') return;
+      total++;
+      if(typeof v === 'number' && !isNaN(v)) numericCount++;
+    });
+    // a column counts as a subject if most non-empty values are numeric marks (0-100 typical range)
+    if(total > 0 && numericCount/total > 0.8){
+      subjectCols.push(col);
+    } else {
+      idCols.push(col);
+    }
+  });
+  document.getElementById('detectStatus').textContent =
+    'Detected identifier columns: '+idCols.join(', ')+' | Subject/mark columns: '+subjectCols.join(', ');
+}
+
+function renderPreview(){
+  const t = document.getElementById('previewTable');
+  const head = '<thead><tr>'+columns.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead>';
+  const body = '<tbody>'+rows.slice(0,5).map(r=>'<tr>'+columns.map(c=>'<td>'+(r[c]??'')+'</td>').join('')+'</tr>').join('')+'</tbody>';
+  t.innerHTML = head+body;
+}
+
+document.getElementById('calcBtn').addEventListener('click', ()=>{
+  if(subjectCols.length < 1){ alert('No numeric subject columns detected.'); return; }
+  results = rows.map(r=>{
+    const marks = subjectCols
+      .filter(c=> r[c] !== '' && r[c] !== null && r[c] !== undefined && !isNaN(Number(r[c])))
+      .map(c=>({subject:c, mark:Number(r[c])}));
+    marks.sort((a,b)=>b.mark-a.mark);
+    const top5 = marks.slice(0,5);
+    const pct = top5.length ? (top5.reduce((s,m)=>s+m.mark,0) / (top5.length*100) * 100) : 0;
+    const out = {};
+    idCols.forEach(c=> out[c] = r[c]);
+    subjectCols.forEach(c=> out[c] = r[c]);
+    out['Top5_Subjects'] = top5.map(m=>m.subject).join(', ');
+    out['Top5_Percentage'] = Math.round(pct*100)/100;
+    return out;
+  });
+  renderResults();
+  resultsCard.classList.remove('hidden');
+});
+
+function renderResults(){
+  const t = document.getElementById('resultsTable');
+  const cols = Object.keys(results[0]);
+  const head = '<thead><tr>'+cols.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead>';
+  const body = '<tbody>'+results.map(r=>'<tr>'+cols.map(c=>{
+    const v = r[c];
+    return c==='Top5_Percentage' ? '<td class="pct">'+v+'%</td>' : '<td>'+(v??'')+'</td>';
+  }).join('')+'</tr>').join('')+'</tbody>';
+  t.innerHTML = head+body;
+}
+
+document.getElementById('dlXlsx').addEventListener('click', ()=>{
+  try{
+    const ws = XLSX.utils.json_to_sheet(results);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Top5 Percentage');
+    XLSX.writeFile(wb, 'cbse_top5_percentage.xlsx');
+  }catch(err){ alert('Excel export failed: '+err.message); }
+});
+
+document.getElementById('dlCsv').addEventListener('click', ()=>{
+  try{
+    const csv = Papa.unparse(results);
+    const blob = new Blob([csv], {type:'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cbse_top5_percentage.csv';
+    a.click();
+  }catch(err){ alert('CSV export failed: '+err.message); }
+});
+</script>
+</body>
+</html>
